@@ -1,4 +1,5 @@
-from typing import Optional
+import re
+from typing import Optional, Tuple
 from pyventus import EventLinker, EventEmitter, AsyncIOEventEmitter
 from obj import BetOption
 from platforms import *
@@ -15,8 +16,15 @@ from datetime import date, datetime, timedelta
 from threading import Lock, Timer
 import sys
 import os
-import time
 from collections import Counter, defaultdict
+import os
+import json
+from itertools import islice
+from rapidfuzz import fuzz
+from rapidfuzz import process as fuzz_process
+from rapidfuzz import utils as fuzz_utils
+from functools import lru_cache
+
 
 # Setup enhanced logging
 log_dir = os.path.join(os.path.dirname(__file__), "logs")
@@ -25,10 +33,7 @@ log_file = os.path.join(log_dir, f"arbitrage_{datetime.now().strftime('%Y%m%d_%H
 
 # Remove default logger and set up console and file loggers
 logger.remove()
-logger.add(sys.stdout, level="INFO", format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>")
-logger.add(log_file, rotation="10 MB", retention="1 week", level="DEBUG", format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}")
-
-logger.info(f"Starting arbitrage odds system. Logs will be saved to {log_file}")
+logger.add(sys.stdout, level="INFO", format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{file}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>")
 
 # Stats tracking
 stats = {
@@ -43,6 +48,8 @@ stats = {
 
 stats_lock = Lock()
 console = Console()
+database: dict[str, BetOption] = {}
+database_lock = Lock()
 
 def generate_stats_table():
     """Generate a rich table with current scraping statistics"""
@@ -75,7 +82,7 @@ def generate_stats_table():
     
     # Recent odds
     recent_odds = ""
-    for odd in reversed(stats["last_odds"]):
+    for odd in islice(reversed(stats["last_odds"]),10):
         recent_odds += f"{odd.platform} - {odd.optionA} vs {odd.optionB}\n"
     if recent_odds:
         table.add_row("Recent Odds", recent_odds.strip())
@@ -99,9 +106,6 @@ def update_progress():
     # Schedule next update
     Timer(5.0, update_progress).start()
 
-# Start the progress tracking after a short delay to allow initialization
-Timer(3.0, update_progress).start()
-
 class EnhancedJSONEncoder(json.JSONEncoder):
     def default(self, o):
         if dataclasses.is_dataclass(o):
@@ -109,14 +113,6 @@ class EnhancedJSONEncoder(json.JSONEncoder):
         elif isinstance(o, date):
             return o.isoformat()
         return super().default(o)
-
-database: dict[str, BetOption] = {}
-database_lock = Lock()
-
-import difflib
-
-import os
-import json
 
 def load_team_aliases():
     try:
@@ -130,50 +126,98 @@ def load_team_aliases():
         logger.error("Error parsing teams_aliases.json")
         return {}
 
-def normalize_team_name(team_name: str, sport: Optional[str] = None) -> str:
+ALIASES = load_team_aliases()
+# set everything to lower in aliases, even main_name
+for sport_aliases in list(ALIASES.values())[:]:
+    for main_name, team_aliases in list(sport_aliases.items())[:]:
+        sport_aliases[main_name.lower()] = [alias.lower() for alias in team_aliases]
+        if main_name.lower() != main_name:
+            del sport_aliases[main_name]
+
+ALL_NAMES = set()
+for sport_aliases in ALIASES.values():
+    for main_name, team_aliases in sport_aliases.items():
+        ALL_NAMES.add(main_name.lower())
+        ALL_NAMES.update(alias.lower() for alias in team_aliases)
+
+@lru_cache(maxsize=1024)
+def normalize_team_name(team_name: str, sport: Optional[str] = None) -> Tuple[str,bool]:
     """Normalise le nom d'une équipe en utilisant les alias connus"""
-    team_lower = team_name.lower().strip()
-    aliases = load_team_aliases()
+    RATIO = 95
     
     # Si le sport est spécifié, chercher uniquement dans ce sport
-    if sport and sport in aliases:
-        sport_aliases = aliases[sport]
+    if sport and sport in ALIASES:
+        sport_aliases = ALIASES[sport]
         for main_name, team_aliases in sport_aliases.items():
-            if team_lower == main_name.lower() or team_lower in [alias.lower() for alias in team_aliases]:
-                return main_name
+            if team_name == main_name.lower() or team_name in team_aliases:
+                return main_name,True
+        # try fuzzy matching
+        ALL_NAMES_SPORT = set()
+        for main_name, team_aliases in sport_aliases.items():
+            ALL_NAMES_SPORT.add(main_name.lower())
+            ALL_NAMES_SPORT.update(team_aliases)
+        best_match = fuzz_process.extractOne(team_name, ALL_NAMES_SPORT, score_cutoff=RATIO,processor=fuzz_utils.default_process)
+        if best_match:
+            logger.debug(f"Fuzzy matched team name: '{team_name}' -> '{best_match}'")
+            return normalize_team_name(best_match[0],sport=sport)
     else:
         # Si pas de sport spécifié, chercher dans tous les sports
-        for sport_aliases in aliases.values():
+        for sport_aliases in ALIASES.values():
             for main_name, team_aliases in sport_aliases.items():
-                if team_lower == main_name.lower() or team_lower in [alias.lower() for alias in team_aliases]:
-                    return main_name
-                    
-    return team_lower
+                if team_name == main_name.lower() or team_name in team_aliases:
+                    return main_name,True
+        # try fuzzy matching
+        best_match = fuzz_process.extractOne(team_name, ALL_NAMES, score_cutoff=RATIO,processor=fuzz_utils.default_process)
+        if best_match:
+            logger.debug(f"Fuzzy matched1 team name: '{team_name}' -> '{main_name}' ({best_match})")
+            return normalize_team_name(best_match[0])
+    return team_name,False
 
+@lru_cache(maxsize=1024)
 def are_similar(str1:str, str2:str, threshold=0.9):
+    str1 = str1.lower().strip()
+    str2 = str2.lower().strip()
     # D'abord essayer avec la normalisation des noms d'équipes
-    norm1 = normalize_team_name(str1)
-    norm2 = normalize_team_name(str2)
+    transform = [
+        ("st","state"),
+        ("st","saint"),
+    ]
     
+    norm1, fixed1 = normalize_team_name(str1)
+    norm2, fixed2 = normalize_team_name(str2)
+    
+    # Apply transformations to both strings
+    for old, new in transform:
+        regex = re.compile(rf"\b{old}\b", re.IGNORECASE)
+        if not fixed1 and regex.search(str1):
+            transformed_str1 = regex.sub(new, str1).strip()
+            norm1, fixed1 = normalize_team_name(transformed_str1)
+        
+        if not fixed2 and regex.search(str2):
+            transformed_str2 = regex.sub(new, str2).strip()
+            norm2, fixed2 = normalize_team_name(transformed_str2)
+    
+    logger.debug(f"Normalized: {str1}=>{norm1} | {str2}=>{norm2}")
+
     # Si les noms normalisés sont identiques, c'est un match
     if norm1 == norm2:
-        logger.debug(f"Teams matched by normalization: '{str1}' and '{str2}'")
+        # logger.info(f"Teams matched by normalization: '{str1}' and '{str2}'")
         return True
         
-    # Sinon, utiliser la comparaison par similarité comme avant
-    similarity = difflib.SequenceMatcher(None, norm1, norm2).ratio()
-    is_similar = similarity >= threshold
+    # Essayer avec la similarité de texte
+    similarity = fuzz.ratio(str1, str2) / 100
+    is_similar = similarity >= threshold 
     
-    if is_similar:
-        logger.debug(f"Teams matched by similarity: '{str1}' and '{str2}' (similarity: {similarity:.2f})")
+    # if is_similar:
+    #     logger.info(f"Teams matched by similarity: '{str1}' and '{str2}' (similarity: {similarity:.2f})")
     
     return is_similar
-
 
 @EventLinker.on("newodd")
 def add_odd(odd: BetOption):
     global database, stats
-    
+    if odd.is_garbage():
+        return
     # Set timestamp if not already set
     if not odd.timestamp:
         odd.timestamp = datetime.now()
@@ -186,7 +230,7 @@ def add_odd(odd: BetOption):
     with stats_lock:
         stats["odds_count"] += 1
         stats["platform_counts"][odd.platform] += 1
-        stats["last_odds"] = (stats["last_odds"] + [odd])[-10:]  # Keep last 10
+        stats["last_odds"] = [*stats["last_odds"] ,odd][-1_000:]  # Keep last 10
     
     # find another odd with same options names, but different platform
     odds = [odd]
@@ -196,17 +240,31 @@ def add_odd(odd: BetOption):
         for other in database.values():
             if other.id == odd.id:
                 continue
-            if odd.platform != other.platform:
+            if odd.platform == other.platform:
                 continue
-            if are_similar(odd.optionA.lower(), other.optionA.lower()) and are_similar(
-                odd.optionB.lower(), other.optionB.lower()
-            ):
-                if odd.platform != other.platform:
+                
+            # Check both standard and reversed order matches
+            standard_match = (are_similar(odd.optionA.lower(), other.optionA.lower()) and 
+                              are_similar(odd.optionB.lower(), other.optionB.lower()))
+            
+            reversed_match = (are_similar(odd.optionA.lower(), other.optionB.lower()) and 
+                              are_similar(odd.optionB.lower(), other.optionA.lower()))
+            
+            if standard_match or reversed_match:
+                if reversed_match and not standard_match:
                     logger.info(
-                        f"Match found: '{odd.optionA} vs {odd.optionB}' on {odd.platform} matches with {other.platform}"
+                        f"Reversed match found: '{odd.optionA} vs {odd.optionB}' on {odd.platform} matches "
+                        f"with '{other.optionB} vs {other.optionA}' on {other.platform}"
                     )
-                    matches_found += 1
-                    odds.append(other)
+                else:
+                    logger.info(
+                        f"Match found: '{odd.optionA} vs {odd.optionB}' on {odd.platform} matches "
+                        f"with '{other.optionA} vs {other.optionB}' on {other.platform}"
+                    )
+                matches_found += 1
+                # Store match type with the odd for later use
+                other.reversed_match = reversed_match and not standard_match
+                odds.append(other)
     
     if matches_found > 0:
         with stats_lock:
@@ -216,14 +274,23 @@ def add_odd(odd: BetOption):
         logger.debug(f"Found {matches_found} matching odds across different platforms")
     
     if len(odds) > 1:
-        # take max of each odd
-        bestA = max(odd.probaA for odd in odds)
-        bestB = max(odd.probaB for odd in odds)
-        bestDraw = (
-            max(odd.probaDraw for odd in odds if odd.probaDraw)
-            if any(odd.probaDraw for odd in odds)
-            else None
-        )
+        # Calculate best odds considering reversed matches
+        bestA = odd.probaA  # Start with current odd
+        bestB = odd.probaB
+        bestDraw = odd.probaDraw
+        
+        # Compare with other odds, accounting for reversed matches
+        for o in odds[1:]:  # Skip the first one (current odd)
+            if hasattr(o, 'reversed_match') and o.reversed_match:
+                # For reversed matches, swap A and B
+                bestA = max(bestA, o.probaB)
+                bestB = max(bestB, o.probaA)
+                # Draw stays the same for reversed matches
+            else:
+                bestA = max(bestA, o.probaA)
+                bestB = max(bestB, o.probaB)
+            
+            bestDraw = max(bestDraw, o.probaDraw) if bestDraw and o.probaDraw else (bestDraw or o.probaDraw)
         
         # calculate sum of inverse odds
         sum_inverse_odds = 1 / bestA + 1 / bestB + (1 / bestDraw if bestDraw else 0)
@@ -259,18 +326,11 @@ def add_odd(odd: BetOption):
             # Rich console output for visual notification
             print(f"\n[bold green]🔔 ARBITRAGE OPPORTUNITY FOUND![/bold green]")
             for o in odds:
-                print(f"[cyan]Platform:[/cyan] [yellow]{o.platform}[/yellow] - [white]{o.optionA} vs {o.optionB}[/white]")
+                if hasattr(o, 'reversed_match') and o.reversed_match:
+                    print(f"[cyan]Platform:[/cyan] [yellow]{o.platform}[/yellow] - [white]{o.optionB} vs {o.optionA}[/white] [magenta](reversed)[/magenta]")
+                else:
+                    print(f"[cyan]Platform:[/cyan] [yellow]{o.platform}[/yellow] - [white]{o.optionA} vs {o.optionB}[/white]")
             print(f"[cyan]Potential profit:[/cyan] [bold green]{profit_percentage:.2f}%[/bold green]\n")
-
-
-event_emitter: EventEmitter = AsyncIOEventEmitter()
-
-markets = [
-    Polymarket(event_emitter),
-    Dexsport(event_emitter),
-]
-
-logger.info(f"Initialized {len(markets)} market platforms: {', '.join(m.__class__.__name__ for m in markets)}")
 
 # on exit call stop on all markets
 def stop_all():
@@ -301,8 +361,47 @@ def stop_all():
     
     logger.info(f"Processed {len(database)} odds in this session")
     logger.info("Shutdown complete")
+
+def save_database_to_json(filename:Optional[str]=None):
+    """Save the current database to a JSON file"""
+    if not filename:
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = os.path.join(os.path.dirname(__file__), f"odds_data_{timestamp}.json")
+    
+    with database_lock:
+        try:
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(database, f, cls=EnhancedJSONEncoder, indent=2)
+            logger.success(f"Successfully saved database to {filename}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to save database: {str(e)}")
+            return False
+
+
+def end():
+    logger.warning("Keyboard interrupt detected")
+    save_prompt = input("Do you want to save the current database to a JSON file? (y/n): ").strip().lower()
+    if save_prompt == 'y':
+        save_database_to_json()
+    stop_all()
     exit(0)
 
 
-atexit.register(stop_all)
-# json.dumps(database, cls=EnhancedJSONEncoder)
+if __name__ == "__main__":
+    logger.add(log_file, rotation="10 MB", retention="1 week", level="DEBUG", format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | - {message}")
+
+    logger.info(f"Starting arbitrage odds system. Logs will be saved to {log_file}")
+
+    # Start the progress tracking after a short delay to allow initialization
+    Timer(3.0, update_progress).start()
+    event_emitter: EventEmitter = AsyncIOEventEmitter()
+
+    markets = [
+        Polymarket(event_emitter),
+        Dexsport(event_emitter),
+    ]
+
+    logger.info(f"Initialized {len(markets)} market platforms: {', '.join(m.__class__.__name__ for m in markets)}")
+
+    atexit.register(end)

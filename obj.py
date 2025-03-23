@@ -47,3 +47,14 @@ class BetOption:
         self.probaB = probaB
         self.probaDraw = probaDraw
         self.timestamp = datetime.now()
+
+    def is_garbage(self):
+        tmp = self.probaA < 0.01 or self.probaB < 0.01
+        if tmp:
+            return True
+        
+        if self.optionA.lower() in ("yes", "no"):
+            return True
+        if self.optionB.lower() in ("yes", "no"):
+            return True
+        return False

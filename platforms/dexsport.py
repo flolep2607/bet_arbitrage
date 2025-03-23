@@ -18,7 +18,7 @@ def chunks(lst, n):
 
 class Dexsport:
     running = False
-    messageQueue = SimpleQueue()
+    messageQueue: SimpleQueue[str] = SimpleQueue()
     RATELIMIT = 5
 
     def __init__(self, event_emitter):
@@ -159,7 +159,7 @@ class Dexsport:
         logger.debug("WebSocket connection opened")
         self.running = True
 
-    def on_close(self, ws):
+    def on_close(self, ws,*args):
         logger.debug("WebSocket connection closed")
         self.running = False
 
@@ -169,12 +169,15 @@ class Dexsport:
 
     def on_message(self, ws, message):
         data = json.loads(message)
-        if data[0] == "event":
-            self.analysis(data[1])
-        elif data[0] == "batch":
-            for msg in data[1]:
+        # logger.debug(f"Received message: {data}")
+        name = data.pop(0)
+        data = data[0]
+        if name == "event":
+            self.analysis(data)
+        elif name == "batch":
+            for msg in data:
                 self.analysis(msg)
-        elif data[0] in ("config", "error"):
+        elif name in ("config", "error"):
             return
         else:
             print("Unhandled message type:", data)
@@ -185,7 +188,7 @@ class Dexsport:
             market_id = msg[1]
             data = msg[3]
             # print(data)
-            if data["name"] in ("Match Winner", "Fight Winner"):
+            if data["name"] in ("Match Winner", "Fight Winner", "Winner. With overtime"):
                 optionA, optionB = None, None
                 probaDraw = None
                 for outcome in data["outcomes"]:
@@ -218,6 +221,10 @@ class Dexsport:
                 else:
                     logger.warning(f"Skipping market {data}")
                     # print(bet)
+            else:
+                # logger.warning(f"Skipping market {data}")
+                # print a lot
+                pass
         elif msg[0] == "event":
             return
         elif msg[0] == "discipline":
@@ -231,7 +238,8 @@ class Dexsport:
         elif msg[0] == "error":
             logger.error(f"error: {json.dumps(msg)}")
         else:
-            print(msg)
+            # print(msg)
+            logger.error(f"{msg}")
 
     def refresh_token(self):
         self.token = self.get_token()

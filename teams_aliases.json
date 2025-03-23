@@ -2510,7 +2510,8 @@
         ],
         "Presbyterian Blue Hose": [
             "Presbyterian",
-            "Blue Hose"
+            "Blue Hose",
+            "presbyterian college"
         ],
         "Manhattan Jaspers": [
             "Manhattan",
@@ -2542,6 +2543,9 @@
         "Portland Trail Blazers": [
             "Trail Blazers",
             "Blazers"
+        ],
+        "Los Angeles Clippers": [
+            "Clippers"
         ]
     },
     "tennis": {
@@ -3397,7 +3401,9 @@
         "Manny Pacquiao": [
             "Pacquiao",
             "PacMan"
-        ]
+        ],
+        "KSI": [],
+        "Dillon Danis": []
     },
     "volleyball": {
         "Brazil Men's National Volleyball Team": [
@@ -3787,9 +3793,6 @@
         "MotoGP": [
             "Moto GP"
         ],
-        "NASCAR": [],
-        "IndyCar Series": [],
-        "Supercross": [],
         "Colin McRae": [
             "McRae",
             "McCrash"
