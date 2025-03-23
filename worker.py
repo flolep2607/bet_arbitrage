@@ -2,7 +2,6 @@ import re
 from typing import Optional, Tuple
 from pyventus import EventLinker, EventEmitter, AsyncIOEventEmitter
 from obj import BetOption
-from platforms import *
 import atexit
 from loguru import logger
 from rich import print
@@ -140,7 +139,7 @@ for sport_aliases in ALIASES.values():
         ALL_NAMES.add(main_name.lower())
         ALL_NAMES.update(alias.lower() for alias in team_aliases)
 
-@lru_cache(maxsize=1024)
+@lru_cache(maxsize=None)
 def normalize_team_name(team_name: str, sport: Optional[str] = None) -> Tuple[str,bool]:
     """Normalise le nom d'une équipe en utilisant les alias connus"""
     RATIO = 95
@@ -169,11 +168,10 @@ def normalize_team_name(team_name: str, sport: Optional[str] = None) -> Tuple[st
         # try fuzzy matching
         best_match = fuzz_process.extractOne(team_name, ALL_NAMES, score_cutoff=RATIO,processor=fuzz_utils.default_process)
         if best_match:
-            logger.debug(f"Fuzzy matched1 team name: '{team_name}' -> '{main_name}' ({best_match})")
+            logger.debug(f"Fuzzy matched1 team name: '{team_name}' -> ({best_match})")
             return normalize_team_name(best_match[0])
     return team_name,False
 
-@lru_cache(maxsize=1024)
 def are_similar(str1:str, str2:str, threshold=0.9):
     str1 = str1.lower().strip()
     str2 = str2.lower().strip()
@@ -197,7 +195,7 @@ def are_similar(str1:str, str2:str, threshold=0.9):
             transformed_str2 = regex.sub(new, str2).strip()
             norm2, fixed2 = normalize_team_name(transformed_str2)
     
-    logger.debug(f"Normalized: {str1}=>{norm1} | {str2}=>{norm2}")
+    # logger.debug(f"Normalized: {str1}=>{norm1} | {str2}=>{norm2}")
 
     # Si les noms normalisés sont identiques, c'est un match
     if norm1 == norm2:
@@ -397,6 +395,7 @@ if __name__ == "__main__":
     Timer(3.0, update_progress).start()
     event_emitter: EventEmitter = AsyncIOEventEmitter()
 
+    from platforms import Polymarket,Dexsport
     markets = [
         Polymarket(event_emitter),
         Dexsport(event_emitter),

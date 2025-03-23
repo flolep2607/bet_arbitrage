@@ -171,6 +171,7 @@ class Dexsport:
         data = json.loads(message)
         # logger.debug(f"Received message: {data}")
         name = data.pop(0)
+        rest = data[1:]
         data = data[0]
         if name == "event":
             self.analysis(data)
@@ -180,7 +181,8 @@ class Dexsport:
         elif name in ("config", "error"):
             return
         else:
-            print("Unhandled message type:", data)
+            # TODO repaire (data=="event"|"tournament"|"discipline") sometimes
+            print("Unhandled message type:", data,"|",rest)
 
     def analysis(self, msg):
         # logger.debug(f"Analysis: {msg[0]}")
