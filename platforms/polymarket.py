@@ -88,7 +88,7 @@ class Polymarket:
                             title=possibility.get("title"),
                             sport=sport,
                             league=league,
-                            date=datetime.strptime(
+                            event_date=datetime.strptime(
                                 possibility.get("endDate"), "%Y-%m-%dT%H:%M:%SZ"
                             ).date(),
                             probaA=1 / priceA,

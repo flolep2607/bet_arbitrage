@@ -150,7 +150,7 @@ def normalize_team_name(team_name: str, sport: Optional[str] = None) -> str:
                     
     return team_lower
 
-def are_similar(str1:str, str2:str, threshold=0.8):
+def are_similar(str1:str, str2:str, threshold=0.9):
     # D'abord essayer avec la normalisation des noms d'équipes
     norm1 = normalize_team_name(str1)
     norm2 = normalize_team_name(str2)
