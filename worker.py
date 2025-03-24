@@ -1,29 +1,32 @@
+from logs import console
 import re
 from typing import Optional, Tuple
 from pyventus import EventLinker, EventEmitter, AsyncIOEventEmitter
-from obj import BetOption
 import atexit
-from loguru import logger
 from rich import print
-from rich.console import Console
 from rich.live import Live
 from rich.table import Table
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 import dataclasses
 import json
 from datetime import date, datetime, timedelta
 from threading import Lock, Timer
-import sys
 import os
 from collections import Counter, defaultdict
-import os
-import json
-from itertools import islice
 from rapidfuzz import fuzz
 from rapidfuzz import process as fuzz_process
 from rapidfuzz import utils as fuzz_utils
 from functools import lru_cache
 import hashlib
+import logging
+from obj import BetOption
+
+logger = logging.getLogger(__name__)
+
+# Define log format with file:line for better debugging
+# LOG_FORMAT = "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{file}</cyan>:<cyan>{line:<4}</cyan> | <level>{message}</level>"
+
+# Remove default logger and set up console and file loggers
+# logger.add(sys.stdout, level="INFO", format=LOG_FORMAT)
 
 class ArbitrageManager:
     def __init__(self):
@@ -105,8 +108,7 @@ class ArbitrageManager:
     def _clean_expired(self):
         """Remove expired arbitrage opportunities"""
         current_time = datetime.now()
-        expired = [h for h, a in self.active_arbitrages.items() 
-                  if self._is_expired(a["timestamp"])]
+        expired = [h for h, a in self.active_arbitrages.items() if self._is_expired(a["timestamp"])]
         for h in expired:
             del self.active_arbitrages[h]
 
@@ -126,18 +128,6 @@ class ArbitrageManager:
             self._clean_expired()
             return len(self.active_arbitrages)
 
-# Global arbitrage manager instance
-arbitrage_manager = ArbitrageManager()
-
-
-# Setup enhanced logging
-log_dir = os.path.join(os.path.dirname(__file__), "logs")
-os.makedirs(log_dir, exist_ok=True)
-log_file = os.path.join(log_dir, f"arbitrage_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
-
-# Remove default logger and set up console and file loggers
-logger.remove()
-logger.add(sys.stdout, level="INFO", format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{file}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>")
 
 class StatsManager:
     def __init__(self):
@@ -185,9 +175,11 @@ class StatsManager:
         with self.lock:
             return list(reversed(self.last_odds))[:limit]
 
+
+# Global arbitrage manager instance
+arbitrage_manager = ArbitrageManager()
 # Global managers
 stats_manager = StatsManager()
-console = Console()
 database: dict[str, BetOption] = {}
 database_lock = Lock()
 
@@ -437,7 +429,7 @@ def add_odd(odd: BetOption):
         # check for arbitrage opportunity
         if sum_inverse_odds < 1:
             profit_percentage = (1 - sum_inverse_odds) * 100
-            logger.success(f"🔥 ARBITRAGE OPPORTUNITY DETECTED! Potential profit: {profit_percentage:.2f}% 🔥")
+            logger.log(25,"BITRAGE OPPORTUNITY DETECTED! Potential profit: {profit_percentage:.2f}% 🔥")
             
             # Calculate optimal bet distribution for 100 unit investment
             total_investment = 100
@@ -517,7 +509,7 @@ def save_database_to_json(filename:Optional[str]=None):
         try:
             with open(filename, 'w', encoding='utf-8') as f:
                 json.dump(database, f, cls=EnhancedJSONEncoder, indent=2)
-            logger.success(f"Successfully saved database to {filename}")
+            logger.log(25,f"Successfully saved database to {filename}")
             return True
         except Exception as e:
             logger.error(f"Failed to save database: {str(e)}")
@@ -526,17 +518,15 @@ def save_database_to_json(filename:Optional[str]=None):
 
 def end():
     logger.warning("Keyboard interrupt detected")
-    save_prompt = input("Do you want to save the current database to a JSON file? (y/n): ").strip().lower()
-    if save_prompt == 'y':
-        save_database_to_json()
+    # save_prompt = input("Do you want to save the current database to a JSON file? (y/n): ").strip().lower()
+    # if save_prompt == 'y':
+    #     save_database_to_json()
     stop_all()
     exit(0)
 
 
 if __name__ == "__main__":
-    logger.add(log_file, rotation="10 MB", retention="1 week", level="DEBUG", format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | - {message}")
-
-    logger.info(f"Starting arbitrage odds system. Logs will be saved to {log_file}")
+    # Format with file name and line number for all logs
 
     event_emitter: EventEmitter = AsyncIOEventEmitter()
 
@@ -546,12 +536,13 @@ if __name__ == "__main__":
         Dexsport(event_emitter),
     ]
 
-    # Start the live display
-    live.start()
-    
-    # Start the progress tracking after a short delay to allow initialization
-    Timer(3.0, update_progress).start()
-
     logger.info(f"Initialized {len(markets)} market platforms: {', '.join(m.__class__.__name__ for m in markets)}")
+
+    # Start the web interface
+    from webapp import run_webapp
+    import threading
+    webapp_thread = threading.Thread(target=run_webapp, daemon=True)
+    webapp_thread.start()
+    logger.info("Web interface started at http://localhost:8000")
 
     atexit.register(end)

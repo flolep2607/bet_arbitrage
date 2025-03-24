@@ -4,13 +4,14 @@ import json
 import os
 import sys
 import argparse
-from datetime import datetime
 from typing import Dict, List
-from loguru import logger
 import glob
-from rich.console import Console
+from logs import console
 from rich.table import Table
 from tqdm import tqdm
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Import the matcher function from worker.py
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -20,11 +21,6 @@ except ImportError:
     logger.error("Could not import functions from worker.py")
     sys.exit(1)
 
-# Configure logger
-logger.remove()
-logger.add(sys.stdout, level="INFO", format="[{name}.py:{line}] <green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{message}</cyan>")
-
-console = Console()
 
 def load_json_data(filename: str) -> Dict:
     """Load data from a JSON file"""
@@ -229,7 +225,7 @@ def main():
     # Count arbitrage opportunities
     arb_count = sum(1 for match in matches if match['profit_percentage'] > 0)
     if arb_count > 0:
-        logger.success(f"Found {arb_count} arbitrage opportunities!")
+        logger.log(25,f"Found {arb_count} arbitrage opportunities!")
     else:
         logger.info("No arbitrage opportunities found")
 

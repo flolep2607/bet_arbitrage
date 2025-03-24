@@ -3,11 +3,13 @@ import json
 import threading
 import websocket
 import time
-from loguru import logger
 from obj import BetOption
 from rich import print
 from queue import SimpleQueue
 import queue
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def chunks(lst, n):
@@ -178,11 +180,11 @@ class Dexsport:
         elif name == "batch":
             for msg in data:
                 self.analysis(msg)
-        elif name in ("config", "error"):
+        elif name in ("config", "error", "leave"):
             return
         else:
             # TODO repaire (data=="event"|"tournament"|"discipline") sometimes
-            print("Unhandled message type:", data,"|",rest)
+            print("Unhandled message type:", name,"##",data,"|",rest)
 
     def analysis(self, msg):
         # logger.debug(f"Analysis: {msg[0]}")

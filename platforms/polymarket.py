@@ -4,8 +4,10 @@ import requests
 from obj import BetOption
 import json
 from datetime import date, datetime
-from loguru import logger
 import time
+import logging
+
+logger = logging.getLogger(__name__)
 
 client = ClobClient("https://clob.polymarket.com/")
 
