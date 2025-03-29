@@ -41,6 +41,10 @@ async def broadcast_stats():
                 formatted_log = format_log_record(log_record)
                 logs.append(formatted_log)
 
+            # Get detailed stats
+            detailed_stats = stats_manager.get_detailed_stats()
+            arbitrage_stats = arbitrage_manager.get_stats()
+            
             stats_data = {
                 "runtime": stats_manager.get_runtime(),
                 "odds_count": stats_manager.odds_count,
@@ -49,7 +53,12 @@ async def broadcast_stats():
                 "platform_breakdown": stats_manager.get_platform_breakdown(),
                 "arbitrages": arbitrage_manager.get_active_arbitrages(),
                 "logs": logs,
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.now().isoformat(),
+                # Add the new detailed statistics
+                "stats": detailed_stats,
+                "arbitrage_stats": arbitrage_stats,
+                # Add hourly summary for the last 24 hours
+                "hourly_summary": stats_manager.get_hourly_summary(24)
             }
             
             # Broadcast to all connected clients

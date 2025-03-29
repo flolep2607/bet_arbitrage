@@ -1,3 +1,4 @@
+import time
 from logs import console
 import re
 from typing import Optional, Tuple
@@ -33,6 +34,10 @@ class ArbitrageManager:
         self.active_arbitrages = {}  # key: hash, value: arbitrage info
         self.lock = Lock()
         self.expiration_timer = 30 * 60  # 30 minutes in seconds
+        self.history = []  # Store historical arbitrage opportunities
+        self.max_history = 1000  # Maximum number of historical entries to keep
+        self.min_profit_threshold = 0.5  # Minimum profit % to consider
+        self.platform_blacklist = set()  # Platforms to ignore
 
     def _get_match_key(self, odds: list[BetOption]) -> set[str]:
         """
@@ -66,6 +71,17 @@ class ArbitrageManager:
         Add a new arbitrage opportunity if it doesn't exist or update if better profit
         Returns True if added/updated, False if ignored
         """
+        # Check if profit meets minimum threshold
+        if profit < self.min_profit_threshold:
+            logger.debug(f"Ignoring arbitrage with low profit: {profit:.2f}% < {self.min_profit_threshold}%")
+            return False
+
+        # Check if any platform is blacklisted
+        platforms = {odd.platform for odd in odds_list}
+        if any(platform in self.platform_blacklist for platform in platforms):
+            logger.debug(f"Ignoring arbitrage with blacklisted platform(s): {platforms & self.platform_blacklist}")
+            return False
+
         with self.lock:
             # Clean expired opportunities first
             self._clean_expired()
@@ -80,30 +96,81 @@ class ArbitrageManager:
                     if profit > existing_arb["profit"]:
                         # Update with better profit
                         logger.info(f"Updated arbitrage {match} with better profit: {profit:.2f}% (was: {existing_arb['profit']:.2f}%)")
-                        arb_info = {
-                            "match": match,
-                            "profit": profit,
-                            "bets": bets,
-                            "timestamp": datetime.now(),
-                            "hash": arb_hash,
-                            "match_key": match_key
-                        }
+                        arb_info = self._create_arbitrage_info(match, profit, bets, match_key, arb_hash, odds_list)
                         self.active_arbitrages[arb_hash] = arb_info
+                        self._update_history(arb_info)
                         return True
                     return False
 
             # New arbitrage opportunity
             arb_hash = hashlib.md5(str(sorted(match_key)).encode()).hexdigest()
-            arb_info = {
-                "match": match,
-                "profit": profit,
-                "bets": bets,
-                "timestamp": datetime.now(),
-                "hash": arb_hash,
-                "match_key": match_key
-            }
+            arb_info = self._create_arbitrage_info(match, profit, bets, match_key, arb_hash, odds_list)
             self.active_arbitrages[arb_hash] = arb_info
+            self._update_history(arb_info)
             return True
+
+    def _create_arbitrage_info(self, match: str, profit: float, bets: list[str], match_key: set, arb_hash: str, odds_list: list[BetOption]) -> dict:
+        """Create a standardized arbitrage info dictionary"""
+        return {
+            "match": match,
+            "profit": profit,
+            "bets": bets,
+            "timestamp": datetime.now(),
+            "hash": arb_hash,
+            "match_key": match_key,
+            "platforms": [odd.platform for odd in odds_list],
+            "bet_count": len(bets),
+            "max_profit": profit  # Track highest profit seen for this opportunity
+        }
+
+    def _update_history(self, arb_info: dict):
+        """Update arbitrage history"""
+        history_entry = {
+            "timestamp": arb_info["timestamp"],
+            "match": arb_info["match"],
+            "profit": arb_info["profit"],
+            "platforms": arb_info["platforms"]
+        }
+        self.history.append(history_entry)
+        
+        # Maintain max history size
+        if len(self.history) > self.max_history:
+            self.history = self.history[-self.max_history:]
+
+    def blacklist_platform(self, platform: str):
+        """Add a platform to the blacklist"""
+        self.platform_blacklist.add(platform)
+        logger.info(f"Added platform to blacklist: {platform}")
+
+    def whitelist_platform(self, platform: str):
+        """Remove a platform from the blacklist"""
+        self.platform_blacklist.discard(platform)
+        logger.info(f"Removed platform from blacklist: {platform}")
+
+    def set_min_profit_threshold(self, threshold: float):
+        """Set minimum profit threshold"""
+        self.min_profit_threshold = threshold
+        logger.info(f"Updated minimum profit threshold to {threshold}%")
+
+    def get_stats(self) -> dict:
+        """Get statistics about arbitrage opportunities"""
+        with self.lock:
+            active_count = len(self.active_arbitrages)
+            total_historical = len(self.history)
+            avg_profit = sum(arb["profit"] for arb in self.active_arbitrages.values()) / active_count if active_count > 0 else 0
+            platform_stats = Counter()
+            for arb in self.active_arbitrages.values():
+                for platform in arb["platforms"]:
+                    platform_stats[platform] += 1
+
+            return {
+                "active_opportunities": active_count,
+                "total_historical": total_historical,
+                "average_profit": avg_profit,
+                "platform_stats": dict(platform_stats),
+                "min_profit_threshold": self.min_profit_threshold,
+                "blacklisted_platforms": list(self.platform_blacklist)
+            }
 
     def _clean_expired(self):
         """Remove expired arbitrage opportunities"""
@@ -137,26 +204,73 @@ class StatsManager:
         self.matches_found = 0
         self.last_odds = []  # Keep track of last 1000 odds for rate calculation
         self.lock = Lock()
+        
+        # New statistics tracking
+        self.hourly_stats = defaultdict(lambda: {
+            'odds_count': 0,
+            'matches_found': 0,
+            'collection_rates': [],
+            'platform_counts': Counter()
+        })
+        self.error_counts = Counter()
+        self.performance_metrics = {
+            'avg_processing_time': 0,
+            'total_processing_time': 0,
+            'processed_items': 0
+        }
+        self.max_odds_rate = 0
+        self.min_odds_rate = float('inf')
 
-    def add_odd(self, odd: BetOption):
-        """Record a new odd"""
+    def add_odd(self, odd: BetOption, processing_time: float = None):
+        """Record a new odd with optional processing time"""
         with self.lock:
             self.odds_count += 1
             self.platform_counts[odd.platform] += 1
             self.last_odds = [*self.last_odds, odd][-1_000:]
+            
+            # Update hourly stats
+            hour_key = datetime.now().strftime('%Y-%m-%d %H:00')
+            self.hourly_stats[hour_key]['odds_count'] += 1
+            self.hourly_stats[hour_key]['platform_counts'][odd.platform] += 1
+            
+            # Update performance metrics if processing time provided
+            if processing_time is not None:
+                self._update_performance_metrics(processing_time)
 
     def add_match(self):
         """Record a new match found"""
         with self.lock:
             self.matches_found += 1
+            hour_key = datetime.now().strftime('%Y-%m-%d %H:00')
+            self.hourly_stats[hour_key]['matches_found'] += 1
 
-    def get_collection_rate(self) -> float:
+    def add_error(self, error_type: str):
+        """Record an error occurrence"""
+        with self.lock:
+            self.error_counts[error_type] += 1
+
+    def _update_performance_metrics(self, processing_time: float):
+        """Update performance tracking metrics"""
+        metrics = self.performance_metrics
+        metrics['total_processing_time'] += processing_time
+        metrics['processed_items'] += 1
+        metrics['avg_processing_time'] = metrics['total_processing_time'] / metrics['processed_items']
+
+    def get_collection_rate(self, window_minutes: int = 1) -> float:
         """Calculate current odds collection rate per minute"""
         with self.lock:
             now = datetime.now()
-            one_minute_ago = now - timedelta(minutes=1)
-            recent_odds = [odd for odd in self.last_odds if odd.timestamp > one_minute_ago]
-            return len(recent_odds) * (60 / max(1, (now - one_minute_ago).total_seconds()))
+            window_ago = now - timedelta(minutes=window_minutes)
+            recent_odds = [odd for odd in self.last_odds if odd.timestamp > window_ago]
+            rate = len(recent_odds) * (60 / max(1, (now - window_ago).total_seconds()))
+            
+            # Update min/max rates
+            if rate > self.max_odds_rate:
+                self.max_odds_rate = rate
+            if rate < self.min_odds_rate and rate > 0:
+                self.min_odds_rate = rate
+                
+            return rate
 
     def get_runtime(self) -> str:
         """Get formatted runtime string"""
@@ -174,6 +288,42 @@ class StatsManager:
         """Get most recent odds with limit"""
         with self.lock:
             return list(reversed(self.last_odds))[:limit]
+
+    def get_detailed_stats(self) -> dict:
+        """Get comprehensive statistics"""
+        with self.lock:
+            current_rate = self.get_collection_rate()
+            return {
+                'runtime': self.get_runtime(),
+                'total_odds': self.odds_count,
+                'total_matches': self.matches_found,
+                'current_rate': current_rate,
+                'max_rate': self.max_odds_rate,
+                'min_rate': self.min_odds_rate if self.min_odds_rate != float('inf') else 0,
+                'platform_stats': dict(self.platform_counts),
+                'hourly_stats': dict(self.hourly_stats),
+                'error_stats': dict(self.error_counts),
+                'performance': {
+                    'avg_processing_time': self.performance_metrics['avg_processing_time'],
+                    'total_processed': self.performance_metrics['processed_items']
+                }
+            }
+
+    def get_hourly_summary(self, hours: int = 24) -> dict:
+        """Get summary of the last N hours of operation"""
+        with self.lock:
+            now = datetime.now()
+            cutoff = now - timedelta(hours=hours)
+            relevant_hours = {
+                hour: stats for hour, stats in self.hourly_stats.items()
+                if datetime.strptime(hour, '%Y-%m-%d %H:00') >= cutoff
+            }
+            return {
+                'hours_analyzed': len(relevant_hours),
+                'total_odds': sum(stats['odds_count'] for stats in relevant_hours.values()),
+                'total_matches': sum(stats['matches_found'] for stats in relevant_hours.values()),
+                'hourly_breakdown': relevant_hours
+            }
 
 
 # Global arbitrage manager instance
@@ -345,6 +495,8 @@ def are_similar(str1:str, str2:str, threshold=0.9):
 @EventLinker.on("newodd")
 def add_odd(odd: BetOption):
     global database
+    start_time = time.time()
+
     if odd.is_garbage():
         return
     # Set timestamp if not already set
@@ -355,8 +507,9 @@ def add_odd(odd: BetOption):
         database[odd.id] = odd
         logger.debug(f"Added new odd: {odd.platform} - {odd.title or 'Untitled'} - {odd.optionA} vs {odd.optionB}")
     
-    # Update stats
-    stats_manager.add_odd(odd)
+    # Update stats with processing time
+    stats_manager.add_odd(odd, processing_time=time.time() - start_time)
+    logger.debug(f"Added odd to stats for platform: {odd.platform}")  # Debug logging
     
     # find another odd with same options names, but different platform
     odds = [odd]
@@ -531,13 +684,17 @@ if __name__ == "__main__":
     event_emitter: EventEmitter = AsyncIOEventEmitter()
 
     from platforms import Polymarket,Dexsport
-    markets = [
-        Polymarket(event_emitter),
-        Dexsport(event_emitter),
-    ]
+    markets = []
+    for platform in [Polymarket,Dexsport]:
+        try:
+            markets.append(platform(event_emitter))
+        except Exception as e:
+            logger.error(f"{e}")
 
     logger.info(f"Initialized {len(markets)} market platforms: {', '.join(m.__class__.__name__ for m in markets)}")
-
+    if len(markets)<2:
+        logger.error("Not enought markets")
+        end()
     # Start the web interface
     from webapp import run_webapp
     import threading
