@@ -49,12 +49,18 @@ class BetOption:
         self.timestamp = datetime.now()
 
     def is_garbage(self):
-        tmp = self.probaA < 0.01 or self.probaB < 0.01
-        if tmp:
+        if (self.probaA < 0.01 or self.probaB < 0.01) or \
+            (self.probaA > 100 or self.probaB > 100):
             return True
         
         if self.optionA.lower() in ("yes", "no"):
             return True
         if self.optionB.lower() in ("yes", "no"):
             return True
+        if self.optionA.lower() == self.optionB.lower():
+            return True
+        
+        if self.event_date and self.event_date < date.today():
+            return True
+        
         return False

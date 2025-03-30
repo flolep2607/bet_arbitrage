@@ -8,22 +8,24 @@ from rich.console import Console
 
 console = Console()
 
-# Queue pour stocker les logs
-class NeverfullQueue(Queue):
-    def __init__(self, *args,**kwargs):
-        super().__init__(*args,**kwargs)
+# # Queue pour stocker les logs
+# class NeverfullQueue(Queue):
+#     def __init__(self, *args,**kwargs):
+#         super().__init__(*args,**kwargs)
     
-    def put_nowait(self, item):
-        try:
-            super().put_nowait(item)
-        except:
-            try:
-                super().get_nowait()  # Remove oldest item if queue is full
-                super().put_nowait(item)
-            except:
-                pass  # If queue is empty or other error occurs, just skip
+#     def put_nowait(self, item):
+#         try:
+#             self.put_nowait(item)
+#         except:
+#             try:
+#                 self.get_nowait()  # Remove oldest item if queue is full
+#                 self.put_nowait(item)
+#             except:
+#                 pass  # If queue is empty or other error occurs, just skip
 
-log_queue = NeverfullQueue(maxsize=1000)  # Garder les 1000 derniers logs
+# log_queue = NeverfullQueue(maxsize=1000)  # Garder les 1000 derniers logs
+
+log_queue = Queue(-1)  # Unlimited size
 
 LOGGING_FORMAT = "%(asctime)s | %(levelname)-8s | %(filename)s:%(lineno)d | %(message)s"
 

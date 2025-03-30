@@ -2,80 +2,103 @@ from fastapi import FastAPI, WebSocket
 from fastapi.concurrency import asynccontextmanager
 from fastapi.responses import HTMLResponse
 import uvicorn
+import logging
+
+logging.getLogger("asyncio").setLevel(logging.WARNING)
 import asyncio
 from datetime import datetime
-from worker import stats_manager, arbitrage_manager
+from worker import manager
 from logs import log_queue
 
-def format_log_record(record):
+
+def format_log_record(record: logging.LogRecord) -> dict:
     """Format log record into the structure expected by the web interface"""
     return {
-        "time": record.asctime.split()[1] if hasattr(record, 'asctime') else datetime.now().strftime("%H:%M:%S"),
+        "time": (
+            record.asctime.split()[1]
+            if hasattr(record, "asctime")
+            else datetime.now().strftime("%H:%M:%S")
+        ),
         "level": record.levelname,
         "message": record.getMessage(),
         "color": {
             "ERROR": "danger",
-            "WARNING": "warning", 
+            "WARNING": "warning",
             "INFO": "info",
             "DEBUG": "secondary",
-            "success": "success", # Pour le niveau personnalisé 'success'
-            "trace": "info"  # Pour le niveau personnalisé 'trace'
-        }.get(record.levelname, "info")
+            "success": "success",  # Pour le niveau personnalisé 'success'
+            "trace": "info",  # Pour le niveau personnalisé 'trace'
+        }.get(record.levelname, "info"),
     }
+
 
 # Store connected websocket clients
 # Use a thread-safe set for websocket connections
 from threading import Lock
-websocket_connections = set()
+
+websocket_connections: set[WebSocket] = set()
 websocket_lock = Lock()
+
 
 async def broadcast_stats():
     """Broadcast stats to all connected clients"""
     while True:
         if websocket_connections:
             # Get recent logs
-            logs = []
-            while not log_queue.empty():
-                log_record = log_queue.get()
-                # Convert log record to the format expected by frontend
-                formatted_log = format_log_record(log_record)
-                logs.append(formatted_log)
+            logs: list[dict] = []
+            logs_count = 0
+            try:
+                while not log_queue.empty() and logs_count < 100:
+                    # Convert log record to the format expected by frontend
+                    formatted_log = format_log_record(log_queue.get_nowait())
+                    logs.append(formatted_log)
+                    logs_count += 1
+            except Exception as e:
+                print(f"Error retrieving logs: {e}")
 
             # Get detailed stats
-            detailed_stats = stats_manager.get_detailed_stats()
-            arbitrage_stats = arbitrage_manager.get_stats()
-            
+            detailed_stats = manager.get_detailed_stats()
+            # arbitrage_stats = manager.get_stats()
+
             stats_data = {
-                "runtime": stats_manager.get_runtime(),
-                "odds_count": stats_manager.odds_count,
-                "collection_rate": stats_manager.get_collection_rate(),
-                "matches_found": stats_manager.matches_found,
-                "platform_breakdown": stats_manager.get_platform_breakdown(),
-                "arbitrages": arbitrage_manager.get_active_arbitrages(),
+                "runtime": manager.get_runtime(),
+                "odds_count": manager.size(),
+                "collection_rate": manager.get_collection_rate(),
+                "matches_found": manager.matches_found,
+                "platform_breakdown": manager.get_platform_breakdown(),
+                "arbitrages": manager.get_active_arbitrages(),
                 "logs": logs,
                 "timestamp": datetime.now().isoformat(),
                 # Add the new detailed statistics
                 "stats": detailed_stats,
-                "arbitrage_stats": arbitrage_stats,
+                # "arbitrage_stats": arbitrage_stats,
                 # Add hourly summary for the last 24 hours
-                "hourly_summary": stats_manager.get_hourly_summary(24)
+                "hourly_summary": manager.get_hourly_summary(24),
             }
-            
+
             # Broadcast to all connected clients
             for connection in websocket_connections.copy():
                 try:
                     await connection.send_json(stats_data)
-                except:
+                except Exception as e:
+                    print(f"Error sending data to websocket: {e}")
                     websocket_connections.remove(connection)
-        await asyncio.sleep(1)  # Update every second
+        await asyncio.sleep(0.5)  # Update every second
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    asyncio.create_task(broadcast_stats())
+    print("Starting lifespan context manager")
+    # Start the stats broadcasting task
+    loop = asyncio.get_event_loop()
+    loop.create_task(broadcast_stats())
     yield
+    print("Stopping lifespan context manager")
+    # Clean up resources if needed
+
 
 app = FastAPI(lifespan=lifespan)
+
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -96,6 +119,7 @@ async def websocket_endpoint(websocket: WebSocket):
         with websocket_lock:
             if websocket in websocket_connections:
                 websocket_connections.remove(websocket)
+
 
 @app.get("/", response_class=HTMLResponse)
 async def get():
@@ -176,23 +200,23 @@ async def get():
                 const logsDiv = document.getElementById('logs');
                 const scrollButton = document.getElementById('scroll-to-bottom');
                 let userHasScrolled = false;
-                
+
                 // Function to check if scrolled to bottom
                 function isScrolledToBottom() {
                     const threshold = 50; // pixels from bottom to consider "at bottom"
                     return logsContainer.scrollHeight - logsContainer.clientHeight <= logsContainer.scrollTop + threshold;
                 }
-                
+
                 // Function to scroll to bottom
                 function scrollToBottom() {
                     logsContainer.scrollTop = logsContainer.scrollHeight;
                     scrollButton.style.display = 'none';
                     userHasScrolled = false;
                 }
-                
+
                 // Scroll button click handler
                 scrollButton.addEventListener('click', scrollToBottom);
-                
+
                 // Track scroll position
                 logsContainer.addEventListener('scroll', function() {
                     if (isScrolledToBottom()) {
@@ -206,7 +230,7 @@ async def get():
 
                 function appendLogs(logs) {
                     const shouldScroll = !userHasScrolled;
-                    
+
                     logs.forEach(log => {
                         const logEntry = document.createElement('div');
                         logEntry.innerHTML = `
@@ -217,30 +241,30 @@ async def get():
                         logsDiv.appendChild(logEntry);
                     });
 
-                    // Keep only last 1000 log entries
-                    while (logsDiv.children.length > 1000) {
+                    // Keep only last 500 log entries
+                    while (logsDiv.children.length > 500) {
                         logsDiv.removeChild(logsDiv.firstChild);
                     }
 
                     // Auto-scroll to bottom only if user hasn't scrolled up
                     if (shouldScroll) {
-                        logsDiv.scrollTop = logsDiv.scrollHeight;
+                        logsContainer.scrollTop = logsContainer.scrollHeight;
                     }
                 }
                 const ws = new WebSocket(`ws://${window.location.host}/ws`);
-                
+
                 ws.onmessage = function(event) {
                     const data = JSON.parse(event.data);
-                    
+
                     // Update stats
                     document.getElementById('runtime').textContent = data.runtime;
                     document.getElementById('odds_count').textContent = data.odds_count;
                     document.getElementById('collection_rate').textContent = data.collection_rate.toFixed(1);
                     document.getElementById('matches_found').textContent = data.matches_found;
-                    
+
                     // Update platform breakdown
-                    document.getElementById('platform_breakdown').innerHTML = data.platform_breakdown.replace(/\\n/g, '<br>');
-                    
+                    document.getElementById('platform_breakdown').innerHTML = Object.entries(data.platform_breakdown).map(([key, value])=>`${key}: ${value}`).join('<br>');
+
                     // Update arbitrages
                     const arbitragesHtml = data.arbitrages.map(arb => `
                         <div class="card arbitrage-card">
@@ -254,17 +278,17 @@ async def get():
                         </div>
                     `).join('');
                     document.getElementById('arbitrages').innerHTML = arbitragesHtml;
-                    
+
                     // Update logs if any new ones
                     if (data.logs && data.logs.length > 0) {
                         appendLogs(data.logs);
                     }
-                    
+
                     // Update timestamp
                     const updateTime = new Date(data.timestamp).toLocaleTimeString();
                     document.getElementById('last_update').textContent = updateTime;
                 };
-                
+
                 ws.onclose = function() {
                     // Try to reconnect
                     setTimeout(() => {
@@ -275,6 +299,7 @@ async def get():
         </body>
     </html>
     """
+
 
 def run_webapp():
     uvicorn.run(app, host="0.0.0.0", port=8000)

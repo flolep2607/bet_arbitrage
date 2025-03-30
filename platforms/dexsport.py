@@ -1,3 +1,4 @@
+from pyventus import EventEmitter
 import requests
 import json
 import threading
@@ -23,7 +24,7 @@ class Dexsport:
     messageQueue: SimpleQueue[str] = SimpleQueue()
     RATELIMIT = 5
 
-    def __init__(self, event_emitter):
+    def __init__(self, event_emitter: EventEmitter):
         self.event_emitter = event_emitter
         self.token = self.get_token()
         self.tracked_events = []
@@ -143,7 +144,6 @@ class Dexsport:
             f"https://prod.dexsport.work/api/sportsbook/express?disciplineIds={','.join(sports)}&limit=100",
             headers={"authorization": f"Bearer {self.token}"},
         ).json()
-        print(len(response["data"]))
         # for event in response["data"]:
         #     for sub_event in event:
         #         self.add_event(sub_event["eventId"])
@@ -166,7 +166,6 @@ class Dexsport:
         self.running = False
 
     def on_error(self, ws, error):
-        print(error)
         logger.error("WebSocket error:", error)
 
     def on_message(self, ws, message):
@@ -184,14 +183,13 @@ class Dexsport:
             return
         else:
             # TODO repaire (data=="event"|"tournament"|"discipline") sometimes
-            print("Unhandled message type:", name,"##",data,"|",rest)
+            logger.error(f"Unhandled message type:{name}##{data}|{rest}")
 
     def analysis(self, msg):
         # logger.debug(f"Analysis: {msg[0]}")
         if msg[0] == "market":
             market_id = msg[1]
             data = msg[3]
-            # print(data)
             if data["name"] in ("Match Winner", "Fight Winner", "Winner. With overtime"):
                 optionA, optionB = None, None
                 probaDraw = None
@@ -199,7 +197,6 @@ class Dexsport:
                     if not "name" in outcome:
                         logger.warning(f"!!!! not 'name' {market_id} => {outcome}")
                     else:
-                        # print(market_id, outcome["name"], outcome["price"])
                         if "Draw" in outcome["name"]:
                             probaDraw = outcome["price"]
                         if optionA is None:
@@ -219,12 +216,11 @@ class Dexsport:
                         probaDraw=probaDraw,
                     )
                     if self.event_emitter:
-                        self.event_emitter.emit("newodd", bet)
+                        self.event_emitter.emit("newodd", odd=bet)
                     else:
                         logger.info(f"Bet: {bet}")
                 else:
                     logger.warning(f"Skipping market {data}")
-                    # print(bet)
             else:
                 # logger.warning(f"Skipping market {data}")
                 # print a lot
@@ -242,7 +238,6 @@ class Dexsport:
         elif msg[0] == "error":
             logger.error(f"error: {json.dumps(msg)}")
         else:
-            # print(msg)
             logger.error(f"{msg}")
 
     def refresh_token(self):
@@ -256,7 +251,7 @@ class Dexsport:
             self.send(["join", "event", [f"2.{event}", f"1.{event}"]])
             self.tracked_events.append(event)
             # Implement logic to send updated tracking to WebSocket
-            print(f"Event added: {event}")
+            logger.debug(f"Event added: {event}")
 
     def add_event(self, event):
         # logger.debug(f"Adding event {event}")
@@ -274,14 +269,13 @@ class Dexsport:
         self.send(["join", "event", [f"2.{event}", f"1.{event}"]])
         self.tracked_events.extend(events)
         # Implement logic to send updated tracking to WebSocket
-        # print(f"Events added: {len(events_ids)}")
 
     def remove_event(self, event):
         if event in self.tracked_events:
             self.send(["leave", "event", [f"2.{event}", f"1.{event}"]])
             self.tracked_events.remove(event)
             # Implement logic to send updated tracking to WebSocket
-            print(f"Event removed: {event}")
+            logger.warning(f"Event removed: {event}")
 
     def stop(self):
         self.timer.cancel()
