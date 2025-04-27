@@ -7,8 +7,8 @@ import logging
 logging.getLogger("asyncio").setLevel(logging.WARNING)
 import asyncio
 from datetime import datetime
-from worker import manager
-from logs import log_queue
+from .worker import manager
+from .logs import log_queue
 
 
 def format_log_record(record: logging.LogRecord) -> dict:
@@ -26,8 +26,8 @@ def format_log_record(record: logging.LogRecord) -> dict:
             "WARNING": "warning",
             "INFO": "info",
             "DEBUG": "secondary",
-            "success": "success",  # Pour le niveau personnalisé 'success'
-            "trace": "info",  # Pour le niveau personnalisé 'trace'
+            "success": "success",  # For the custom 'success' level
+            "trace": "info",       # For the custom 'trace' level
         }.get(record.levelname, "info"),
     }
 
@@ -103,22 +103,35 @@ app = FastAPI(lifespan=lifespan)
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
+    logger = logging.getLogger(__name__)
+    logger.debug(f"New WebSocket connection established")
+    
     with websocket_lock:
         websocket_connections.add(websocket)
+    
     try:
         while True:
-            # Keep connection alive and wait for any client messages
-            await websocket.receive_text()
+            # Attente active des messages du client
+            message = await websocket.receive_text()
+            # Traitement des messages clients si nécessaire
+            logger.debug(f"Received message from client: {message}")
+            
+            # Si le client envoie une commande spécifique, on peut la traiter ici
+            if message.startswith("cmd:"):
+                cmd = message[4:]
+                logger.info(f"Command received: {cmd}")
+                # Traitement des commandes (à implémenter selon les besoins)
+                await websocket.send_json({"status": "ok", "command": cmd})
+                
     except Exception as e:
-        # Clean up on any error
-        with websocket_lock:
-            if websocket in websocket_connections:
-                websocket_connections.remove(websocket)
+        # Gestion des exceptions avec logging approprié
+        logger.error(f"WebSocket error: {e}", exc_info=True)
     finally:
-        # Make sure we always clean up
+        # Nettoyage de la connexion dans tous les cas
         with websocket_lock:
             if websocket in websocket_connections:
                 websocket_connections.remove(websocket)
+        logger.debug(f"WebSocket connection closed")
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -271,6 +284,7 @@ async def get():
                             <div class="card-body">
                                 <h5 class="card-title">${arb.match}</h5>
                                 <p class="profit-high">Profit: ${arb.profit.toFixed(2)}%</p>
+                                <p>Date: ${arb.date}</p>
                                 <ul class="list-unstyled">
                                     ${arb.bets.map(bet => `<li>• ${bet}</li>`).join('')}
                                 </ul>

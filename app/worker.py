@@ -1,4 +1,3 @@
-from logs import console
 from pyventus import EventLinker, EventEmitter, AsyncIOEventEmitter
 import atexit
 from rich.live import Live
@@ -6,10 +5,10 @@ from rich.table import Table
 import json
 from datetime import date, datetime, timedelta
 from threading import Lock, Timer
-import os
 import logging
-from config import *
-from manager import Manager
+from .logs import console
+from .config import *
+from .manager import Manager
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +19,11 @@ logger = logging.getLogger(__name__)
 # logger.add(sys.stdout, level="INFO", format=LOG_FORMAT)
 
 manager = Manager(console=console)
+
+@EventLinker.on("update_date")
+def update_date(event_id:str, start_time:date):
+    """Update the date for the event"""
+    manager.update_date(event_id, start_time)
 
 @EventLinker.on("newodd")
 def truc(odd):
@@ -89,7 +93,7 @@ def stop_all():
     logger.info(f"Total runtime: {manager.get_runtime()}")
     logger.info(f"Total odds collected: {manager.size()}")
     logger.info(f"Matches found: {manager.matches_found}")
-    logger.info(f"Current arbitrage opportunities: {manager.get_count()}")
+    logger.info(f"Current arbitrage opportunities: {manager.arbitrage_count()}")
 
     # Platform breakdown
     logger.info("Platform breakdown:")
@@ -117,7 +121,7 @@ def end():
 
 
 if __name__ == "__main__":
-    from platforms import Polymarket, Dexsport
+    from .platforms import Polymarket, Dexsport
 
     event_emitter: EventEmitter = AsyncIOEventEmitter()
     markets = []
@@ -134,7 +138,7 @@ if __name__ == "__main__":
         logger.error("Not enought markets")
         end()
     # Start the web interface
-    from webapp import run_webapp
+    from .webapp import run_webapp
     import threading
 
     webapp_thread = threading.Thread(target=run_webapp, daemon=True)

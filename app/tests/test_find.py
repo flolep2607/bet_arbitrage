@@ -6,7 +6,7 @@ import sys
 import argparse
 from typing import Dict, List
 import glob
-from logs import console
+from ..logs import console
 from rich.table import Table
 from tqdm import tqdm
 import logging
@@ -16,7 +16,8 @@ logger = logging.getLogger(__name__)
 # Import the matcher function from worker.py
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
-    from worker import are_similar, normalize_team_name, BetOption, EnhancedJSONEncoder
+    from ..worker import Manager
+    from ..obj import BetOption
 except ImportError:
     logger.error("Could not import functions from worker.py")
     sys.exit(1)
@@ -52,13 +53,13 @@ def find_matches_in_data(data: Dict, threshold: float = 0.9) -> List:
             # Try to match both team combinations:
             # Standard order: A1 vs B1 matches A2 vs B2
             standard_match = (
-                are_similar(item1['optionA'], item2['optionA'], threshold) and 
-                are_similar(item1['optionB'], item2['optionB'], threshold)
+                Manager.are_similar(item1['optionA'], item2['optionA'], threshold) and 
+                Manager.are_similar(item1['optionB'], item2['optionB'], threshold)
             )
             # Reversed order: A1 vs B1 matches B2 vs A2
             reversed_match = (
-                are_similar(item1['optionA'], item2['optionB'], threshold) and 
-                are_similar(item1['optionB'], item2['optionA'], threshold)
+                Manager.are_similar(item1['optionA'], item2['optionB'], threshold) and 
+                Manager.are_similar(item1['optionB'], item2['optionA'], threshold)
             )
             
             # Check if either match pattern works

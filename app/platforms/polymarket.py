@@ -3,7 +3,7 @@ from py_clob_client.client import ClobClient, BookParams
 import threading
 from pyventus import EventEmitter
 import requests
-from obj import BetOption
+from ..obj import BetOption
 import json
 from datetime import date, datetime
 import logging

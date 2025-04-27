@@ -13,10 +13,11 @@ from typing import Optional, Tuple
 from rapidfuzz import fuzz
 from rapidfuzz import process as fuzz_process
 from rapidfuzz import utils as fuzz_utils
+from .obj import BetOption
+from .config import *
+from typing import Set, Dict, Optional, TypeVar
 
-from pyventus import EventLinker
-from obj import BetOption
-from config import *
+T = TypeVar("T")
 
 logger = logging.getLogger(__name__)
 
@@ -25,55 +26,208 @@ def load_team_aliases():
     try:
         aliases_path = os.path.join(os.path.dirname(__file__), "teams_aliases.json")
         with open(aliases_path, "r", encoding="utf-8") as f:
-            ALIASES=json.load(f)
+            ALIASES = json.load(f)
         # set everything to lower in aliases, even main_name
         for sport_aliases in list(ALIASES.values())[:]:
             for main_name, team_aliases in list(sport_aliases.items())[:]:
-                sport_aliases[main_name.lower()] = [alias.lower() for alias in team_aliases]
+                sport_aliases[main_name.lower()] = [
+                    alias.lower() for alias in team_aliases
+                ]
                 if main_name.lower() != main_name:
                     del sport_aliases[main_name]
-        
+
         ALL_NAMES = set()
         for sport_aliases in ALIASES.values():
             for main_name, team_aliases in sport_aliases.items():
                 ALL_NAMES.add(main_name.lower())
                 ALL_NAMES.update(alias.lower() for alias in team_aliases)
-        return ALIASES,ALL_NAMES
+        return ALIASES, ALL_NAMES
     except FileNotFoundError:
         logger.warning("teams_aliases.json not found, using default empty dictionary")
     except json.JSONDecodeError:
         logger.error("Error parsing teams_aliases.json")
-    return ({},set())
+    return ({}, set())
 
-ALIASES,ALL_NAMES = load_team_aliases()
+
+ALIASES, ALL_NAMES = load_team_aliases()
+
 
 class Singleton(type):
     _instances = {}
+
     def __call__(cls, *args, **kwargs):
         if cls not in cls._instances:
             cls._instances[cls] = super(Singleton, cls).__call__(*args, **kwargs)
         return cls._instances[cls]
 
-class Manager(metaclass=Singleton):
 
-    def __init__(self,console):
+
+T = TypeVar('T')
+V = TypeVar('V')  # Type pour la valeur associée
+
+class SetStructure:
+    def __init__(self):
+        self.data: Dict[T, Set[T]] = {}
+        self.set_values: Dict[frozenset[T], V] = {}  # Use frozenset hash as key
+
+    def add_set(self, new_set: Set[T], value: V) -> None:
+        # Convert to frozenset for hashing
+        new_frozen = frozenset(new_set)
+        
+        # Check if any element already exists in a set
+        existing_set = None
+        for element in new_set:
+            if element in self.data:
+                existing_set = self.data[element]
+                break
+
+        if existing_set:
+            # Merge sets
+            merged_set = existing_set | new_set
+            merged_frozen = frozenset(merged_set)
+
+            # Update data dictionary with merged set
+            for element in merged_set:
+                self.data[element] = merged_set
+
+            # Update value - always use the new value for merged sets
+            self.set_values[merged_frozen] = value
+            
+            # Clean up old values if present
+            old_frozen = frozenset(existing_set)
+            if old_frozen in self.set_values and old_frozen != merged_frozen:
+                del self.set_values[old_frozen]
+        else:
+            # Add new set
+            for element in new_set:
+                self.data[element] = new_set
+            self.set_values[new_frozen] = value
+
+    def find_set(self, element: T) -> Optional[Set[T]]:
+        return self.data.get(element)
+
+    def get_set_value(self, element: T) -> Optional[V]:
+        # If element is already a set or frozenset, use it directly
+        if isinstance(element, (set, frozenset)):
+            key = frozenset(element)
+            value = self.set_values.get(key)
+            if value is not None:
+                return value
+            
+            # Try to find a matching set with the same elements
+            for k, v in self.set_values.items():
+                if set(k) == set(element):
+                    return v
+            return None
+            
+        # Otherwise look up the set containing the element
+        found_set = self.find_set(element)
+        if found_set:
+            key = frozenset(found_set)
+            value = self.set_values.get(key)
+            if value is not None:
+                return value
+                
+            # Try to find a matching set with the same elements
+            for k, v in self.set_values.items():
+                if set(k) == set(found_set):
+                    return v
+                    
+        return None
+
+    def delete_set(self, element: T) -> bool:
+        found_set = self.find_set(element)
+        if found_set:
+            for elem in found_set:
+                if elem in self.data:
+                    del self.data[elem]
+            if found_set in self.set_values:
+                del self.set_values[found_set]
+            return True
+        return False
+
+    def delete_key(self, element: T) -> bool:
+        if element in self.data:
+            found_set = self.find_set(element)
+            del self.data[element]
+            # Si c'était le dernier élément du set, on supprime aussi la valeur associée
+            if found_set and all(e not in self.data for e in found_set):
+                del self.set_values[found_set]
+            return True
+        return False
+
+class Graph:
+    def __init__(self):
+        self.lock = Lock()
+        self.groups: SetStructure[str,float] = SetStructure()
+        self.values: dict[str, BetOption] = {}
+
+    def add_node(self, node: BetOption):
+        with self.lock:
+            self.values[node.id] = node
+            self.groups.add_set({node.id}, 0.0)
+    
+    def add_group(self, odds_list: list[BetOption], value: float):
+        with self.lock:
+            group_ids = set()
+            for odd in odds_list:
+                self.values[odd.id] = odd
+                group_ids.add(odd.id)
+            self.groups.add_set(group_ids, value)
+    
+    def count_groups(self):
+        with self.lock:
+            return len(self.groups.data)
+    
+    def items(self):
+        with self.lock:
+            # Debug: print all keys and values in set_values
+            # logger.debug(f"GRAPH ITEMS - Available keys in set_values: {list(self.groups.set_values.keys())}")
+            # logger.debug(f"GRAPH ITEMS - Values count: {len(self.groups.set_values)}")
+            
+            # Use frozenset to store sets of IDs
+            groups_ids = {frozenset(s) for s in self.groups.data.values()}
+            # logger.debug(f"GRAPH ITEMS - Groups count: {len(groups_ids)}")
+            
+            for ids in groups_ids:
+                if len(ids)==1:continue
+                bets = [self.values[i] for i in ids if i in self.values]
+                value = self.groups.get_set_value(frozenset(ids))
+                
+                # Debug info about the value lookup
+                # logger.debug(f"GRAPH ITEMS - Looking for key: {frozenset(ids)}")
+                # logger.debug(f"GRAPH ITEMS - Found value: {value}")
+                
+                # if value is None:
+                #     # Check if there's a similar key that contains the same elements
+                #     for key in self.groups.set_values.keys():
+                #         if set(key) == set(ids):
+                #             logger.debug(f"GRAPH ITEMS - Found similar key with different order: {key}")
+                #             value = self.groups.set_values[key]
+                #             break
+                if value and value > 0:
+                    yield bets, value
+
+
+
+class Manager(metaclass=Singleton):
+    def __init__(self, console):
         # ArbitrageManager attributes
-        self.active_arbitrages = {}  # key: hash, value: arbitrage info
-        self.arbitrage_lock = Lock()
+        self.graph = Graph()
         self.expiration_timer = 300  # 5 minutes default
         self.history = []  # Store historical arbitrage opportunities
         self.max_history = 1000
         self.min_profit_threshold = 1.0  # 1% minimum profit
-        self.platform_blacklist = set()
 
         # StatsManager attributes
         self.start_time = datetime.now()
         self.platform_counts = Counter()
         self.matches_found = 0
+        self.db_update_date: dict[str, date] = {}
         self.database: dict[str, BetOption] = {}  # key: odd.id, value: BetOption
-        self.stats_lock = Lock()
         self.database_lock = Lock()
-        self.console=console
+        self.stats_lock = Lock()
+        self.console = console
 
         # Additional statistics tracking
         self.hourly_stats = defaultdict(
@@ -93,6 +247,24 @@ class Manager(metaclass=Singleton):
         self.max_odds_rate = 0
         self.min_odds_rate = float("inf")
 
+    def update_date(self,event_id:str, start_time:date):
+        """Update the date for the event"""
+        with self.database_lock:
+            self.db_update_date[event_id] = start_time
+            if event_id in self.database:
+                self.database[event_id].event_date = start_time
+                logger.debug(f"Updated date for event {event_id} to {start_time}")
+            
+
+    def clear(self):
+        """Cleanup resources and close connections if needed"""
+        self.database.clear()
+        self.graph = Graph()
+        self.history.clear()
+        self.platform_counts.clear()
+        self.matches_found = 0
+        self.hourly_stats.clear()
+    
     # Arbitrage Methods
     def _get_match_key(self, odds: list[BetOption]) -> set[str]:
         """Generate a unique key for a match based on platform IDs"""
@@ -105,45 +277,31 @@ class Manager(metaclass=Singleton):
         return (datetime.now() - timestamp).total_seconds() > self.expiration_timer
 
     def add_arbitrage(
-        self, match: str, profit: float, bets: list[str], odds_list: list[BetOption]
+        self, 
+        profit: float,
+        odds_list: list[BetOption],
     ) -> bool:
-        """Add a new arbitrage opportunity if it doesn't exist or update if better profit"""
-        if profit < self.min_profit_threshold:
-            logger.debug(
-                f"Ignoring arbitrage with low profit: {profit:.2f}% < {self.min_profit_threshold}%"
-            )
-            return False
-
-        platforms = {odd.platform for odd in odds_list}
-        if any(platform in self.platform_blacklist for platform in platforms):
-            logger.debug(
-                f"Ignoring arbitrage with blacklisted platform(s): {platforms & self.platform_blacklist}"
-            )
-            return False
-
         self._clean_expired()
+        match = f"{odds_list[0].optionA} vs {odds_list[0].optionB}"
+        bet_strings = []  # We should calculate bet strings here if needed
         match_key = self._get_match_key(odds_list)
-        with self.arbitrage_lock:
-            for arb_hash, existing_arb in self.active_arbitrages.items():
-                if existing_arb.get("match_key", set()) == match_key:
-                    if profit > existing_arb["profit"]:
-                        logger.info(
-                            f"Updated arbitrage {match} with better profit: {profit:.2f}% (was: {existing_arb['profit']:.2f}%)"
-                        )
-                        arb_info = self._create_arbitrage_info(
-                            match, profit, bets, match_key, arb_hash, odds_list
-                        )
-                        self.active_arbitrages[arb_hash] = arb_info
-                        self._update_history(arb_info)
-                        return True
-                    return False
-
-        arb_hash = hashlib.md5(str(sorted(match_key)).encode()).hexdigest()
+        arb_hash = hashlib.md5(str(match_key).encode()).hexdigest()
+        
+        # Add group to graph
+        self.graph.add_group(odds_list, profit)
+        
+        # Create and update arbitrage info
         arb_info = self._create_arbitrage_info(
-            match, profit, bets, match_key, arb_hash, odds_list
+            match=match,
+            profit=profit,
+            bets=bet_strings,
+            match_key=match_key,
+            arb_hash=arb_hash,
+            odds_list=odds_list
         )
-        self.active_arbitrages[arb_hash] = arb_info
         self._update_history(arb_info)
+        
+        logger.debug(f"Added arbitrage opportunity with profit {profit:.2f}%")
         return True
 
     def _create_arbitrage_info(
@@ -183,28 +341,41 @@ class Manager(metaclass=Singleton):
 
     def _clean_expired(self):
         """Remove expired arbitrage opportunities"""
-        with self.arbitrage_lock:
+        return
+        with self.graph_lock:
             expired = [
-                h
-                for h, a in self.active_arbitrages.items()
-                if self._is_expired(a["timestamp"])
+                h for h, a in self.graph.items() if self._is_expired(a["timestamp"])
             ]
             for h in expired:
-                del self.active_arbitrages[h]
+                del self.graph[h]
 
     def get_active_arbitrages(self) -> list[dict]:
         """Get list of active arbitrage opportunities sorted by profit"""
         self._clean_expired()
-        with self.arbitrage_lock:
-            return sorted(
-                self.active_arbitrages.values(), key=lambda x: x["profit"], reverse=True
-            )
-
-    def get_arbitrage_count(self) -> int:
-        """Get count of currently active arbitrage opportunities"""
-        self._clean_expired()
-        with self.arbitrage_lock:
-            return len(self.active_arbitrages)
+        # Filter out items with None values and provide a default of 0.0
+        arbitrages = []
+        for bets, profit in self.graph.items():
+            if profit is not None:
+                match = f"{bets[0].optionA} vs {bets[0].optionB}" if bets else "Unknown Match"
+                
+                # Récupérer la date du match si disponible
+                match_date = None
+                for bet in bets:
+                    if bet.event_date:
+                        match_date = bet.event_date
+                        break
+                
+                arb_info = {
+                    "match": match,
+                    "profit": profit,
+                    "date": match_date.strftime("%Y-%m-%d") if match_date else "Unknown date",
+                    "bets": [f"{bet.platform}: {bet.optionA} vs {bet.optionB}" for bet in bets],
+                    "platforms": [bet.platform for bet in bets],
+                }
+                arbitrages.append(arb_info)
+        
+        # Sort by profit
+        return sorted(arbitrages, key=lambda x: x["profit"], reverse=True)
 
     def add_match(self):
         """Record a new match found"""
@@ -324,75 +495,100 @@ class Manager(metaclass=Singleton):
 
     def arbitrage_count(self):
         """Get count of currently active arbitrage opportunities"""
-        with self.arbitrage_lock:
-            return len(self.active_arbitrages)
-    
+        return self.graph.count_groups()
+
     def size(self) -> int:
         """Get size of the database"""
         with self.database_lock:
             return len(self.database)
 
-    def add_odd(self,odd: BetOption):
+    def add_odd(self, odd: BetOption):
         if odd.is_garbage():
             return
-        
-        logger.debug(f"Added new odd: {odd.platform} - {odd.title or 'Untitled'} - {odd.optionA} vs {odd.optionB}")
-        
+
+        logger.debug(
+            f"Added new odd: {odd.platform} - {odd.title or 'Untitled'} - {odd.optionA} vs {odd.optionB}"
+        )
+        odd.event_date = odd.event_date or self.db_update_date.get(odd.id)
+
         if not odd.id in self.database:
             # Add new odd to the database
             with self.database_lock:
                 self.platform_counts[odd.platform] += 1
-        
+
+        self.graph.add_node(odd)
         self.database[odd.id] = odd
         # find another odd with same options names, but different platform
         odds = [odd]
         matches_found = 0
-        
+
         with self.database_lock:
             for other in self.database.values():
                 if other.id == odd.id:
                     continue
                 if odd.platform == other.platform:
                     continue
-                    
+
+                # Vérifier d'abord si les dates correspondent (si elles sont définies)
+                # Accepter un match seulement si les dates sont nulles ou égales +/- 1 jour
+                if odd.event_date and other.event_date:
+                    # Si les deux ont des dates, elles doivent être identiques ou au maximum à 1 jour d'écart
+                    date_diff = abs((odd.event_date - other.event_date).days) if isinstance(odd.event_date, date) else None
+                    if date_diff is not None and date_diff > 1:
+                        # Dates trop éloignées, ce ne peut pas être le même match
+                        # logger.debug(
+                        #     f"Date mismatch: '{odd.optionA} vs {odd.optionB}' on {odd.event_date} vs "
+                        #     f"'{other.optionA} vs {other.optionB}' on {other.event_date}"
+                        # )
+                        continue
+                logger.debug(
+                    f"Date match: '{odd.optionA} vs {odd.optionB}' on {odd.event_date} vs "
+                    f"'{other.optionA} vs {other.optionB}' on {other.event_date}"
+                )
                 # Check both standard and reversed order matches
-                standard_match = (self.are_similar(odd.optionA.lower(), other.optionA.lower()) and 
-                                    self.are_similar(odd.optionB.lower(), other.optionB.lower()))
-                
-                reversed_match = (self.are_similar(odd.optionA.lower(), other.optionB.lower()) and 
-                                    self.are_similar(odd.optionB.lower(), other.optionA.lower()))
-                
+                standard_match = self.are_similar(
+                    odd.optionA.lower(), other.optionA.lower()
+                ) and self.are_similar(odd.optionB.lower(), other.optionB.lower())
+
+                reversed_match = self.are_similar(
+                    odd.optionA.lower(), other.optionB.lower()
+                ) and self.are_similar(odd.optionB.lower(), other.optionA.lower())
+
                 if standard_match or reversed_match:
                     if reversed_match and not standard_match:
                         logger.info(
                             f"Reversed match found: '{odd.optionA} vs {odd.optionB}' on {odd.platform} matches "
                             f"with '{other.optionB} vs {other.optionA}' on {other.platform}"
+                            f"{' - Match date: ' + str(odd.event_date) if odd.event_date else ''}"
                         )
                     else:
                         logger.info(
                             f"Match found: '{odd.optionA} vs {odd.optionB}' on {odd.platform} matches "
                             f"with '{other.optionA} vs {other.optionB}' on {other.platform}"
+                            f"{' - Match date: ' + str(odd.event_date) if odd.event_date else ''}"
                         )
                     matches_found += 1
                     # Store match type with the odd for later use
                     other.reversed_match = reversed_match and not standard_match
                     odds.append(other)
-            
+
         if matches_found > 0:
             self.add_match()
-        
+
         if matches_found > 0:
-            logger.debug(f"Found {matches_found} matching odds across different platforms")
-        
+            logger.debug(
+                f"Found {matches_found} matching odds across different platforms"
+            )
+
         if len(odds) > 1:
             # Calculate best odds considering reversed matches
             bestA = odd.probaA  # Start with current odd
             bestB = odd.probaB
             bestDraw = odd.probaDraw
-            
+
             # Compare with other odds, accounting for reversed matches
             for o in odds[1:]:  # Skip the first one (current odd)
-                if hasattr(o, 'reversed_match') and o.reversed_match:
+                if hasattr(o, "reversed_match") and o.reversed_match:
                     # For reversed matches, swap A and B
                     bestA = max(bestA, o.probaB)
                     bestB = max(bestB, o.probaA)
@@ -400,49 +596,76 @@ class Manager(metaclass=Singleton):
                 else:
                     bestA = max(bestA, o.probaA)
                     bestB = max(bestB, o.probaB)
-                
-                bestDraw = max(bestDraw, o.probaDraw) if bestDraw and o.probaDraw else (bestDraw or o.probaDraw)
-            
+
+                bestDraw = (
+                    max(bestDraw, o.probaDraw)
+                    if bestDraw and o.probaDraw
+                    else (bestDraw or o.probaDraw)
+                )
+
             # calculate sum of inverse odds
             sum_inverse_odds = 1 / bestA + 1 / bestB + (1 / bestDraw if bestDraw else 0)
-            
+
             # Log detailed odds information
             platforms = ", ".join(sorted(set(o.platform for o in odds)))
             logger.info(f"Comparing odds across {len(odds)} platforms ({platforms})")
-            logger.info(f"Best odds: {odd.optionA}={bestA:.2f}, {odd.optionB}={bestB:.2f}, Draw={bestDraw if bestDraw else 'N/A'}")
-            logger.info(f"Sum of inverse odds: {sum_inverse_odds:.4f} (< 1.0 indicates arbitrage opportunity)")
-            
+            logger.info(
+                f"Best odds: {odd.optionA}={bestA:.2f}, {odd.optionB}={bestB:.2f}, Draw={bestDraw if bestDraw else 'N/A'}"
+            )
+            logger.info(
+                f"Sum of inverse odds: {sum_inverse_odds:.4f} (< 1.0 indicates arbitrage opportunity)"
+            )
+
             # check for arbitrage opportunity
             if sum_inverse_odds < 1:
                 profit_percentage = (1 - sum_inverse_odds) * 100
-                logger.log(25,f"BITRAGE OPPORTUNITY DETECTED! Potential profit: {profit_percentage:.2f}% 🔥")
-                
+                logger.log(
+                    25,
+                    f"ARBITRAGE OPPORTUNITY DETECTED! Potential profit: {profit_percentage:.2f}% 🔥",
+                )
+
                 # Calculate optimal bet distribution for 100 unit investment
                 total_investment = 100
                 optimalA = (total_investment / bestA) / sum_inverse_odds
                 optimalB = (total_investment / bestB) / sum_inverse_odds
-                optimalDraw = (total_investment / bestDraw) / sum_inverse_odds if bestDraw else 0
-                
+                optimalDraw = (
+                    (total_investment / bestDraw) / sum_inverse_odds if bestDraw else 0
+                )
+
                 # print the optimal bets and expected profit
                 logger.info(f"Optimal bet distribution for {total_investment} units:")
-                logger.info(f"Bet {optimalA:.2f} units on '{odd.optionA}' at odds {bestA:.2f}")
-                logger.info(f"Bet {optimalB:.2f} units on '{odd.optionB}' at odds {bestB:.2f}")
+                logger.info(
+                    f"Bet {optimalA:.2f} units on '{odd.optionA}' at odds {bestA:.2f}"
+                )
+                logger.info(
+                    f"Bet {optimalB:.2f} units on '{odd.optionB}' at odds {bestB:.2f}"
+                )
                 if bestDraw:
-                    logger.info(f"Bet {optimalDraw:.2f} units on 'Draw' at odds {bestDraw:.2f}")
-                logger.info(f"Expected return: {total_investment/sum_inverse_odds:.2f} units (Profit: {profit_percentage:.2f}%)")
-                
+                    logger.info(
+                        f"Bet {optimalDraw:.2f} units on 'Draw' at odds {bestDraw:.2f}"
+                    )
+                logger.info(
+                    f"Expected return: {total_investment/sum_inverse_odds:.2f} units (Profit: {profit_percentage:.2f}%)"
+                )
+
                 # Create formatted strings for bets
                 bet_strings = []
-                bet_strings.append(f"Bet {optimalA:.2f} units on '{odd.optionA}' at odds {bestA:.2f}")
-                bet_strings.append(f"Bet {optimalB:.2f} units on '{odd.optionB}' at odds {bestB:.2f}")
+                bet_strings.append(
+                    f"Bet {optimalA:.2f} units on '{odd.optionA}' at odds {bestA:.2f}"
+                )
+                bet_strings.append(
+                    f"Bet {optimalB:.2f} units on '{odd.optionB}' at odds {bestB:.2f}"
+                )
                 if bestDraw:
-                    bet_strings.append(f"Bet {optimalDraw:.2f} units on 'Draw' at odds {bestDraw:.2f}")
+                    bet_strings.append(
+                        f"Bet {optimalDraw:.2f} units on 'Draw' at odds {bestDraw:.2f}"
+                    )
 
                 # Try to add to arbitrage manager using all odds involved
                 is_new = self.add_arbitrage(
-                    match=f"{odd.optionA} vs {odd.optionB}",
+                    # match=f"{odd.optionA} vs {odd.optionB}",
                     profit=profit_percentage,
-                    bets=bet_strings,
+                    # bets=bet_strings,
                     odds_list=odds
                 )
 
@@ -451,85 +674,111 @@ class Manager(metaclass=Singleton):
                     return
 
                 # Rich console output for visual notification
-                self.console.print(f"\n[bold green]🔔 ARBITRAGE OPPORTUNITY FOUND![/bold green]")
+                self.console.print(
+                    f"\n[bold green]🔔 ARBITRAGE OPPORTUNITY FOUND![/bold green]"
+                )
                 for o in odds:
-                    if hasattr(o, 'reversed_match') and o.reversed_match:
-                        self.console.print(f"[cyan]Platform:[/cyan] [yellow]{o.platform}[/yellow] - [white]{o.optionB} vs {o.optionA}[/white] [magenta](reversed)[/magenta]")
+                    if hasattr(o, "reversed_match") and o.reversed_match:
+                        self.console.print(
+                            f"[cyan]Platform:[/cyan] [yellow]{o.platform}[/yellow] - [white]{o.optionB} vs {o.optionA}[/white] [magenta](reversed)[/magenta]"
+                        )
                     else:
-                        self.console.print(f"[cyan]Platform:[/cyan] [yellow]{o.platform}[/yellow] - [white]{o.optionA} vs {o.optionB}[/white]")
-                self.console.print(f"[cyan]Potential profit:[/cyan] [bold green]{profit_percentage:.2f}%[/bold green]")
+                        self.console.print(
+                            f"[cyan]Platform:[/cyan] [yellow]{o.platform}[/yellow] - [white]{o.optionA} vs {o.optionB}[/white]"
+                        )
+                self.console.print(
+                    f"[cyan]Potential profit:[/cyan] [bold green]{profit_percentage:.2f}%[/bold green]"
+                )
                 self.console.print(f"[cyan]Details:[/cyan] {odds}\n")
 
+    @staticmethod
     @lru_cache(maxsize=None)
-    def normalize_team_name(self,team_name: str, sport: Optional[str] = None) -> Tuple[str,bool]:
+    def normalize_team_name(
+        team_name: str, sport: Optional[str] = None
+    ) -> Tuple[str, bool]:
         """Normalise le nom d'une équipe en utilisant les alias connus"""
         RATIO = TEAM_NAME_MATCH_RATIO
-        
+
         # Si le sport est spécifié, chercher uniquement dans ce sport
         if sport and sport in ALIASES:
             sport_aliases = ALIASES[sport]
             for main_name, team_aliases in sport_aliases.items():
                 if team_name == main_name.lower() or team_name in team_aliases:
-                    return main_name,True
+                    return main_name, True
             # try fuzzy matching
             ALL_NAMES_SPORT = set()
             for main_name, team_aliases in sport_aliases.items():
                 ALL_NAMES_SPORT.add(main_name.lower())
                 ALL_NAMES_SPORT.update(team_aliases)
-            best_match = fuzz_process.extractOne(team_name, ALL_NAMES_SPORT, score_cutoff=RATIO,processor=fuzz_utils.default_process)
+            best_match = fuzz_process.extractOne(
+                team_name,
+                ALL_NAMES_SPORT,
+                score_cutoff=RATIO,
+                processor=fuzz_utils.default_process,
+            )
             if best_match:
-                logger.debug(f"Fuzzy matched team name: '{team_name}' -> '{best_match}'")
-                return self.normalize_team_name(best_match[0],sport=sport)
+                logger.debug(
+                    f"Fuzzy matched team name: '{team_name}' -> '{best_match}'"
+                )
+                return Manager.normalize_team_name(best_match[0], sport=sport)
         else:
             # Si pas de sport spécifié, chercher dans tous les sports
             for sport_aliases in ALIASES.values():
                 for main_name, team_aliases in sport_aliases.items():
                     if team_name == main_name.lower() or team_name in team_aliases:
-                        return main_name,True
+                        return main_name, True
             # try fuzzy matching
-            best_match = fuzz_process.extractOne(team_name, ALL_NAMES, score_cutoff=RATIO,processor=fuzz_utils.default_process)
+            best_match = fuzz_process.extractOne(
+                team_name,
+                ALL_NAMES,
+                score_cutoff=RATIO,
+                processor=fuzz_utils.default_process,
+            )
             if best_match:
-                logger.debug(f"Fuzzy matched1 team name: '{team_name}' -> ({best_match})")
-                return self.normalize_team_name(best_match[0])
-        return team_name,False
+                logger.debug(
+                    f"Fuzzy matched1 team name: '{team_name}' -> ({best_match})"
+                )
+                return Manager.normalize_team_name(best_match[0])
+        return team_name, False
 
-    def are_similar(self,str1:str, str2:str, threshold=SIMILAR_STRINGS_THRESHOLD):
+    @staticmethod
+    def are_similar(str1: str, str2: str, threshold=SIMILAR_STRINGS_THRESHOLD):
         str1 = str1.lower().strip()
         str2 = str2.lower().strip()
         # D'abord essayer avec la normalisation des noms d'équipes
         transform = [
-            ("st","state"),
-            ("st","saint"),
+            ("st", "state"),
+            ("st", "saint"),
         ]
-        
-        norm1, fixed1 = self.normalize_team_name(str1)
-        norm2, fixed2 = self.normalize_team_name(str2)
-        
+
+        norm1, fixed1 = Manager.normalize_team_name(str1)
+        norm2, fixed2 = Manager.normalize_team_name(str2)
+
         # Apply transformations to both strings
         for old, new in transform:
             regex = re.compile(rf"\b{old}\b", re.IGNORECASE)
             if not fixed1 and regex.search(str1):
                 transformed_str1 = regex.sub(new, str1).strip()
-                norm1, fixed1 = self.normalize_team_name(transformed_str1)
-            
+                norm1, fixed1 = Manager.normalize_team_name(transformed_str1)
+
             if not fixed2 and regex.search(str2):
                 transformed_str2 = regex.sub(new, str2).strip()
-                norm2, fixed2 = self.normalize_team_name(transformed_str2)
-        
+                norm2, fixed2 = Manager.normalize_team_name(transformed_str2)
+
         # logger.debug(f"Normalized: {str1}=>{norm1} | {str2}=>{norm2}")
 
         # Si les noms normalisés sont identiques, c'est un match
         if norm1 == norm2:
             # logger.info(f"Teams matched by normalization: '{str1}' and '{str2}'")
             return True
-            
+
         # Essayer avec la similarité de texte
         similarity = fuzz.ratio(str1, str2) / 100
-        is_similar = similarity >= threshold 
-        
+        is_similar = similarity >= threshold
+
         # if is_similar:
         #     logger.info(f"Teams matched by similarity: '{str1}' and '{str2}' (similarity: {similarity:.2f})")
-        
+
         return is_similar
 
     class EnhancedJSONEncoder(json.JSONEncoder):
@@ -557,4 +806,3 @@ class Manager(metaclass=Singleton):
             except Exception as e:
                 logger.error(f"Failed to save database: {str(e)}")
                 return False
-
